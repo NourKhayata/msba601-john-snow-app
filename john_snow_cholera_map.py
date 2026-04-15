@@ -1,179 +1,94 @@
-from pathlib import Path
+#developed by Fouad Zablith
 
+import streamlit as st
 import pandas as pd
 import pydeck as pdk
-import streamlit as st
 from PIL import Image
 
-BASE_DIR = Path(__file__).resolve().parent
-DATA_FILE = BASE_DIR / "CholeraPumps_Deaths.xls"
-IMAGE_FILE = BASE_DIR / "Snow-cholera-map-1.jpg"
+#load the data from excel in a dateframe
+#a similar (with cleaner ) dataset is accessible online at https://docs.google.com/file/d/0B1k6zmQ4NXQlZ0dBcjFrNWhUSTA/edit
+data = pd.read_excel(r'CholeraPumps_Deaths.xls')
+df = pd.DataFrame(data, columns=['count','geometry'])
 
-st.set_page_config(
-    page_title="John Snow Cholera Map",
-    page_icon="🗺️",
-    layout="wide",
-)
+#clean and replace the coordinates data to fit the PyDeck map 
+df = df.replace({'<Point><coordinates>': ''},regex=True )
+df = df.replace({'</coordinates></Point>': ''},regex=True )
 
+#create new longitude and latitude columns in dataframe
+split = df['geometry'].str.split(',',n=1, expand=True)
+df['lon'] = split[0].astype(float)
+df['lat'] = split[1].astype(float)
 
-@st.cache_data
-def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    data = pd.read_excel(DATA_FILE)
-    df = pd.DataFrame(data, columns=["count", "geometry"])
+df.drop(columns=['geometry'], inplace = True)
 
-    df["geometry"] = (
-        df["geometry"]
-        .str.replace("<Point><coordinates>", "", regex=False)
-        .str.replace("</coordinates></Point>", "", regex=False)
-    )
+#st.write(df)
 
-    split = df["geometry"].str.split(",", n=1, expand=True)
-    df["lon"] = split[0].astype(float)
-    df["lat"] = split[1].astype(float)
-    df = df.drop(columns=["geometry"])
+st.header('John Snow\'s 1854 Cholera Deaths Map in London')
+st.subheader('This is a recreation of Snow\'s famous map that helped identifying the source of cholera oubreak in London')
 
-    deaths_df = df[df["count"] >= 0].copy()
-    pumps_df = df[df["count"] == -999].copy()
+#create a slider to filter the number of deaths
+death_to_filter = st.slider('Number of Deaths', 0, 15, 2)  # min: 0 death, max: 15 deaths, default: 7 deaths
+filtered_df = df[df['count'] >= death_to_filter]
+st.subheader(f'Map of more than {death_to_filter} deaths')
 
-    # radius is scaled for map readability
-    deaths_df["radius"] = deaths_df["count"].clip(lower=1) * 8
+#get the pumps location from the last 8 entries in the data (in the original data source, pumps were noted as having -999 death as a differentiator)
+pumps_df = df[df['count'] == -999]
 
-    distribution_df = (
-        deaths_df.groupby("count", as_index=False)
-        .size()
-        .rename(columns={"size": "locations"})
-        .sort_values("count")
-    )
+#checkbox to enable seeing the location of pumps
+if(st.checkbox('Show pumps',value=True)):
+    pump_radius = 5
+else:
+    pump_radius = 0
 
-    return deaths_df, pumps_df, distribution_df
+# CHANGE 1 done by Nour: add a metric summary
+col1, col2 = st.columns(2)
+col1.metric('Death locations shown', len(filtered_df[filtered_df['count'] != -999]))
+col2.metric('Pumps in dataset', len(pumps_df))
 
-
-deaths_df, pumps_df, distribution_df = load_data()
-
-st.title("John Snow's 1854 Cholera Deaths Map")
-st.markdown(
-    "An interactive view of the Soho cholera outbreak showing death clusters and nearby water pumps."
-)
-
-with st.sidebar:
-    st.header("Map controls")
-    min_deaths, max_deaths = int(deaths_df["count"].min()), int(deaths_df["count"].max())
-    death_range = st.slider(
-        "Death count range",
-        min_value=min_deaths,
-        max_value=max_deaths,
-        value=(1, max_deaths),
-        help="Show only locations whose recorded deaths fall inside this range.",
-    )
-    show_pumps = st.checkbox("Show pumps", value=True)
-    map_style_label = st.selectbox(
-        "Basemap style",
-        ["Light", "Dark", "Road", "Satellite"],
-        index=0,
-    )
-    show_table = st.checkbox("Show filtered data table", value=False)
-    show_original = st.checkbox("Show original historical map image", value=True)
-
-filtered_deaths = deaths_df[
-    deaths_df["count"].between(death_range[0], death_range[1])
-].copy()
-
-locations_shown = int(len(filtered_deaths))
-total_deaths_shown = int(filtered_deaths["count"].sum())
-pump_count = int(len(pumps_df))
-
-metric_1, metric_2, metric_3 = st.columns(3)
-metric_1.metric("Locations shown", f"{locations_shown}")
-metric_2.metric("Deaths represented", f"{total_deaths_shown}")
-metric_3.metric("Water pumps", f"{pump_count}")
-
-MAP_STYLES = {
-    "Light": pdk.map_styles.LIGHT,
-    "Dark": pdk.map_styles.DARK,
-    "Road": pdk.map_styles.ROAD,
-    "Satellite": pdk.map_styles.SATELLITE,
-}
-
-layers = [
-    pdk.Layer(
-        "ScatterplotLayer",
-        data=filtered_deaths,
-        get_position="[lon, lat]",
-        get_fill_color="[200, 30, 0, 170]",
-        get_radius="radius",
-        pickable=True,
-    )
-]
-
-if show_pumps:
-    layers.append(
-        pdk.Layer(
-            "ScatterplotLayer",
-            data=pumps_df,
-            get_position="[lon, lat]",
-            get_fill_color="[0, 70, 220, 220]",
-            get_radius=20,
-            pickable=True,
-        )
-    )
-
-st.pydeck_chart(
-    pdk.Deck(
-        map_style=MAP_STYLES[map_style_label],
-        initial_view_state=pdk.ViewState(
-            latitude=51.5134,
-            longitude=-0.1365,
-            zoom=15.5,
-            pitch=0,
-        ),
-        tooltip={
-            "html": "<b>Deaths:</b> {count}<br/><b>Longitude:</b> {lon}<br/><b>Latitude:</b> {lat}",
-            "style": {"backgroundColor": "white", "color": "black"},
-        },
-        layers=layers,
+st.pydeck_chart(pdk.Deck(
+    map_style='mapbox://styles/mapbox/light-v9',
+    initial_view_state=pdk.ViewState(
+        latitude=51.5134,
+        longitude=-0.1365,
+        zoom=15.5,
+        pitch=0,
     ),
-    use_container_width=True,
-)
-
-st.caption("Red circles represent cholera deaths. Blue circles represent water pumps.")
-
-chart_col, notes_col = st.columns([1.15, 0.85])
-
-with chart_col:
-    st.subheader("Distribution of deaths by location")
-    st.bar_chart(distribution_df.set_index("count")["locations"], use_container_width=True)
-
-with notes_col:
-    st.subheader("What changed in this version")
-    st.markdown(
-        """
-        1. Added a **death count range filter** instead of a single-threshold slider.
-        2. Added **summary metrics** for locations, deaths, and pumps.
-        3. Added **hover tooltips** and a **basemap selector**.
-        4. Added a **bar chart** and optional **data table** for better analysis.
-        """
-    )
-
-if show_table:
-    st.subheader("Filtered dataset")
-    st.dataframe(
-        filtered_deaths[["count", "lon", "lat"]].sort_values("count", ascending=False),
-        use_container_width=True,
-    )
-
-if show_original and IMAGE_FILE.exists():
-    image = Image.open(IMAGE_FILE)
-    st.subheader("Original map of John Snow")
-    st.image(
-        image,
-        caption=(
-            "Original map by John Snow showing the cluster of cholera cases in London during the 1854 outbreak."
+    layers=[
+        pdk.Layer(
+            'ScatterplotLayer',
+            data=filtered_df[filtered_df['count'] != -999],
+            get_position='[lon, lat]',
+            get_color='[200, 30, 0, 160]',
+            get_radius='[count]',
+            pickable=True,
         ),
-        use_container_width=True,
-    )
+        pdk.Layer(
+            'ScatterplotLayer',
+            data=pumps_df,
+            get_position='[lon, lat]',
+            get_color='[0, 0, 255, 160]',
+            get_radius=pump_radius,
+            pickable=True,
+        ),
+     ],
+    # CHANGE 2 done by Nour: add hover tooltip
+    tooltip={
+        'html': '<b>Deaths:</b> {count}',
+        'style': {'backgroundColor': 'white', 'color': 'black'}
+    }
+))
 
-with st.expander("Historical context"):
-    st.write(
-        "John Snow's map is a classic example of spatial analysis. By comparing cholera deaths with nearby water pumps, "
-        "he was able to identify the Broad Street pump as the likely source of the outbreak."
-    )
+st.markdown('The red dots show the locations of deaths with a size reflecting the numbers of deaths, and the blue dots show the locations of water pumps.')
+
+# CHANGE 3  done by Nour: optional filtered table
+if st.checkbox('Show filtered data table'):
+    st.dataframe(filtered_df[filtered_df['count'] != -999])
+
+image = Image.open('Snow-cholera-map-1.jpg')
+
+st.subheader('Original map of John Snow')
+st.image(image,caption='Original map by John Snow showing the clusters of cholera cases in the London epidemic of 1854, drawn and lithographed by Charles Cheffins',use_container_width=True)
+
+st.markdown('The source of the above map and more details on John Snow\'s work can be found here: [https://en.wikipedia.org/wiki/John_Snow](https://en.wikipedia.org/wiki/John_Snow)')
+
+st.markdown("Developed by [Fouad Zablith](http://fouad.zablith.org). If you have any question about this simple app, you can reach me through: [@fzablith](https://twitter.com/fzablith)")
